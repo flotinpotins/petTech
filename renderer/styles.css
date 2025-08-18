@@ -180,3 +180,32 @@ html, body {
         transform: scale(1);
     }
 }
+
+/* Chat floating action button */
+#chat-fab {
+    position: absolute;
+    top: 8px;
+    right: 8px;
+    width: 32px;
+    height: 32px;
+    border-radius: 16px;
+    border: none;
+    outline: none;
+    cursor: pointer;
+    background: rgba(28,28,30,0.72);
+    color: #fff;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    box-shadow: 0 4px 16px rgba(0,0,0,0.3);
+    opacity: 0;
+    transition: opacity 180ms ease;
+}
+
+#app:hover #chat-fab {
+    opacity: 1;
+}
+
+#chat-fab:focus-visible,#chat-fab:hover {
+    opacity: 1;
+}

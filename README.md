@@ -21,7 +21,7 @@ The app opens a 360x360 transparent, frameless, always-on-top window.
 Copy `.env.example` to `.env` and optionally set an absolute path to a `.riv` file. If omitted, the app loads `assets/pet.riv`.
 
 ```
-PET_RIV_PATH=F:\\rviepet\\pet.riv
+PET_RIV_PATH=F:\\rviepet\\assets\\pet.riv
 ```
 
 Security rules for reading `.riv`:
@@ -49,5 +49,28 @@ If inputs or state machine are missing, the app logs warnings and continues.
 
 - High DPI: the canvas auto-resizes to devicePixelRatio and listens for DPI changes
 - Clean up: the Rive instance is cleaned up on window close
+
+
+## Step 2: Chat Popover (Comfly Chat streaming)
+
+Env keys (see `.env.example`):
+
+```
+CHAT_API_BASE=https://ai.comfly.chat
+CHAT_API_KEY=sk-9Syi1Zv9NCI8o5ry9110F8379c424fAa8514F55b628e7907 
+CHAT_API_MODEL=gpt-4o-mini
+CHAT_MAX_TURNS=50
+PERSONA_CUSTOM_FILE=./persona/custom.txt
+PERSONA_GREETING_FILE=./persona/greeting.txt
+```
+
+IPC contracts:
+- `chat:openPopover` open/anchor the chat popover near the pet window
+- `chat:send` send a user message
+- `chat:delta` stream deltas to the chat window
+- `pet:actions` optional actions mapping to Rive triggers
+
+UI variables used by chat window:
+- `--bg`, `--fg`, `--bubble-user`, `--bubble-bot` (dark theme)
 
 

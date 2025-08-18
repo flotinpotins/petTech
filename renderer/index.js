@@ -28,10 +28,19 @@ let currentState = 'IDLE';
 let availableAnimations = {};
 let clickFallbackTimer = null;
 
+// State Machine 模式
+let useStateMachine = false;
+const STATE_MACHINE_NAME = 'State Machine 1';
+let smInputs = { click: null, awake: null, sleep: null };
+
 // 交互状态
 let isDragging = false;
 let dragStartTime = 0;
 let dragStartPos = { x: 0, y: 0 };
+let rafMoveId = 0;
+let pendingScreenTarget = null;
+let windowLeftTopAtDown = { x: 0, y: 0 };
+let pointerOffsetAtDown = { x: 0, y: 0 };
 let lastMoveTime = 0;
 let sleepGraceTimer = null;
 let isPointerInside = true;
@@ -41,6 +50,7 @@ let loadingOverlay = null;
 let errorOverlay = null;
 let errorText = null;
 let retryBtn = null;
+let chatFab = null;
 
 /**
  * 等待 Rive 库加载
@@ -48,6 +58,11 @@ let retryBtn = null;
 function waitForRive() {
     return new Promise((resolve, reject) => {
         if (typeof rive !== 'undefined') {
+            try {
+                if (rive.RuntimeLoader && typeof rive.RuntimeLoader.setWasmUrl === 'function') {
+                    rive.RuntimeLoader.setWasmUrl('../node_modules/@rive-app/canvas/rive.wasm');
+                }
+            } catch (e) {}
             resolve();
             return;
         }
@@ -58,6 +73,11 @@ function waitForRive() {
         const checkRive = () => {
             attempts++;
             if (typeof rive !== 'undefined') {
+                try {
+                    if (rive.RuntimeLoader && typeof rive.RuntimeLoader.setWasmUrl === 'function') {
+                        rive.RuntimeLoader.setWasmUrl('../node_modules/@rive-app/canvas/rive.wasm');
+                    }
+                } catch (e) {}
                 resolve();
             } else if (attempts >= maxAttempts) {
                 reject(new Error('Rive 库加载超时'));
@@ -84,6 +104,7 @@ async function init() {
         errorOverlay = document.getElementById('error-overlay');
         errorText = document.getElementById('error-text');
         retryBtn = document.getElementById('retry-btn');
+        chatFab = document.getElementById('chat-fab');
         
         if (!canvas) {
             throw new Error('找不到画布元素');
@@ -136,33 +157,58 @@ async function loadRiveAnimation() {
     try {
         showLoading(true);
         
-        // 确保 electronAPI 可用
-        if (!window.electronAPI) {
-            throw new Error('electronAPI 未就绪');
-        }
-        
-        // 获取动画文件路径
-        const rivPath = window.electronAPI.getEnvVar('PET_RIV_PATH') || './assets/pet.riv';
-        
-        console.log('加载动画文件:', rivPath);
-        
-        // 读取动画文件
-        const fileBuffer = await window.electronAPI.readFileBuffer(rivPath);
-        
-        // 创建 Rive 实例
-        riveInstance = new rive.Rive({
-            buffer: fileBuffer,
-            canvas: canvas,
-            autoplay: false,
-            onLoad: () => {
-                console.log('Rive 动画加载成功');
-                onRiveLoaded();
-            },
-            onLoadError: (error) => {
-                console.error('Rive 加载错误:', error);
-                showError('动画加载失败', `无法加载动画文件: ${error}`);
+        let usedBufferMode = false;
+        let rivSrc = '../assets/pet.riv';
+
+        if (window.electronAPI) {
+            try {
+                const envPath = window.electronAPI.getEnvVar('PET_RIV_PATH');
+                const rivPath = envPath || './assets/pet.riv';
+                console.log('加载动画文件(IPC):', rivPath);
+                const fileBuffer = await window.electronAPI.readFileBuffer(rivPath);
+                if (!fileBuffer || typeof fileBuffer.byteLength === 'undefined' || fileBuffer.byteLength === 0) {
+                    throw new Error('读取到的文件为空');
+                }
+                usedBufferMode = true;
+                riveInstance = new rive.Rive({
+                    buffer: fileBuffer,
+                    canvas: canvas,
+                    autoplay: true,
+                    stateMachines: STATE_MACHINE_NAME,
+                    onLoad: () => {
+                        console.log('Rive 动画加载成功');
+                        onRiveLoaded();
+                    },
+                    onLoadError: (error) => {
+                        console.error('Rive 加载错误:', error);
+                        showError('动画加载失败', `无法加载动画文件: ${error}`);
+                    }
+                });
+            } catch (e) {
+                console.warn('通过 electronAPI 加载失败，回退到相对路径:', e);
             }
-        });
+        } else {
+            console.warn('electronAPI 不可用，使用相对路径加载 .riv');
+        }
+
+        if (!usedBufferMode) {
+            // 从相对路径回退加载（从 renderer/ 到 ../assets/）
+            console.log('加载动画文件(src):', rivSrc);
+            riveInstance = new rive.Rive({
+                src: rivSrc,
+                canvas: canvas,
+                autoplay: true,
+                stateMachines: STATE_MACHINE_NAME,
+                onLoad: () => {
+                    console.log('Rive 动画加载成功(src)');
+                    onRiveLoaded();
+                },
+                onLoadError: (error) => {
+                    console.error('Rive 加载错误(src):', error);
+                    showError('动画加载失败', `无法加载动画文件: ${error}`);
+                }
+            });
+        }
         
     } catch (error) {
         console.error('加载动画文件失败:', error);
@@ -181,11 +227,20 @@ function onRiveLoaded() {
             throw new Error('无法获取 artboard');
         }
         
-        // 扫描可用动画
-        scanAvailableAnimations();
+        // 优先尝试 State Machine 输入
+        setupStateMachineInputs();
+
+        // 如果没有 State Machine 输入则回退到动画扫描
+        if (!useStateMachine) {
+            scanAvailableAnimations();
+        }
         
-        // 开始播放默认动画
-        playAnimation('IDLE');
+        // 开始播放默认动画/触发唤醒
+        if (useStateMachine) {
+            triggerStateAction('IDLE');
+        } else {
+            playAnimation('IDLE');
+        }
         
         // 隐藏加载界面
         showLoading(false);
@@ -197,6 +252,25 @@ function onRiveLoaded() {
     } catch (error) {
         console.error('Rive 初始化失败:', error);
         showError('动画初始化失败', error.message);
+    }
+}
+
+function setupStateMachineInputs() {
+    try {
+        const inputs = riveInstance.stateMachineInputs(STATE_MACHINE_NAME) || [];
+        const byName = {};
+        for (const input of inputs) {
+            byName[input.name] = input;
+        }
+        smInputs.click = byName['clik'] || byName['click'] || null;
+        smInputs.awake = byName['chick-awake'] || byName['awake'] || null;
+        smInputs.sleep = byName['chick-sleep'] || byName['sleep'] || null;
+        useStateMachine = Boolean(smInputs.click || smInputs.awake || smInputs.sleep);
+        if (useStateMachine) {
+            console.log('使用 State Machine 模式');
+        }
+    } catch (e) {
+        useStateMachine = false;
     }
 }
 
@@ -243,6 +317,10 @@ function scanAvailableAnimations() {
  */
 function playAnimation(stateKey) {
     try {
+        if (useStateMachine) {
+            triggerStateAction(stateKey);
+            return;
+        }
         const animData = availableAnimations[stateKey];
         
         if (!animData) {
@@ -253,10 +331,10 @@ function playAnimation(stateKey) {
             return;
         }
         
-        // 清除之前的动画
-        artboard.animationByIndex(0)?.delete();
-        
-        // 播放新动画
+        // 播放新动画（清理已有动画实例后播放）
+        try {
+            artboard.animationByIndex(0)?.delete();
+        } catch (e) {}
         const animationInstance = new rive.LinearAnimationInstance(animData.animation);
         artboard.addAnimationInstance(animationInstance);
         
@@ -273,6 +351,17 @@ function playAnimation(stateKey) {
         if (stateKey !== 'IDLE') {
             playAnimation('IDLE');
         }
+    }
+}
+
+function triggerStateAction(stateKey) {
+    if (!useStateMachine) return;
+    if (stateKey === 'CLICK' && smInputs.click) {
+        smInputs.click.fire();
+    } else if (stateKey === 'SLEEP' && smInputs.sleep) {
+        smInputs.sleep.fire();
+    } else if (stateKey === 'IDLE' && smInputs.awake) {
+        smInputs.awake.fire();
     }
 }
 
@@ -316,9 +405,36 @@ function bindEvents() {
     if (retryBtn) {
         retryBtn.addEventListener('click', handleRetry);
     }
+
+    if (chatFab) {
+        chatFab.addEventListener('click', async () => {
+            try {
+                await window.chatAPI.openPopover();
+            } catch (e) {}
+        });
+    }
     
     // DPI 变化监听
     setupDPIListener();
+
+    // Listen optional pet actions from chat
+    if (window.petAPI && typeof window.petAPI.onActions === 'function') {
+        window.petAPI.onActions((payload) => {
+            try {
+                const actions = (payload && payload.actions) || [];
+                for (const action of actions) {
+                    if (!action || !action.name) continue;
+                    if (action.name === 'click') {
+                        playAnimation('CLICK');
+                    } else if (action.name === 'awake') {
+                        playAnimation('IDLE');
+                    } else if (action.name === 'sleep') {
+                        playAnimation('SLEEP');
+                    }
+                }
+            } catch (e) {}
+        });
+    }
     
     console.log('事件监听器绑定完成');
 }
@@ -365,6 +481,17 @@ function handlePointerDown(e) {
         clearTimeout(sleepGraceTimer);
         sleepGraceTimer = null;
     }
+    // 记录窗口左上角的屏幕坐标与指针偏移
+    if (window.electronAPI && typeof window.electronAPI.getBounds === 'function') {
+        window.electronAPI.getBounds().then(({ bounds, scaleFactor }) => {
+            if (!bounds) return;
+            const s = scaleFactor || (window.devicePixelRatio || 1);
+            const dipLeftTop = { x: bounds.x, y: bounds.y };
+            windowLeftTopAtDown = { x: dipLeftTop.x * s, y: dipLeftTop.y * s };
+            const pointerScreen = { x: e.screenX, y: e.screenY };
+            pointerOffsetAtDown = { x: pointerScreen.x - windowLeftTopAtDown.x, y: pointerScreen.y - windowLeftTopAtDown.y };
+        }).catch(() => {});
+    }
 }
 
 /**
@@ -384,11 +511,20 @@ function handlePointerMove(e) {
         console.log('开始拖拽');
     }
     
-    // 如果正在拖拽，移动窗口（节流处理）
-    if (isDragging && currentTime - lastMoveTime > 8) { // ~120Hz
-        window.electronAPI.moveWindow(deltaX, deltaY);
-        dragStartPos = { x: e.clientX, y: e.clientY };
-        lastMoveTime = currentTime;
+    // rAF 合并：计算目标屏幕左上角
+    if (isDragging && window.electronAPI && typeof window.electronAPI.moveTo === 'function') {
+        const targetScreenX = e.screenX - pointerOffsetAtDown.x;
+        const targetScreenY = e.screenY - pointerOffsetAtDown.y;
+        pendingScreenTarget = { x: targetScreenX, y: targetScreenY };
+        if (!rafMoveId) {
+            rafMoveId = requestAnimationFrame(() => {
+                rafMoveId = 0;
+                if (pendingScreenTarget) {
+                    window.electronAPI.moveTo(pendingScreenTarget.x, pendingScreenTarget.y);
+                    pendingScreenTarget = null;
+                }
+            });
+        }
     }
 }
 
@@ -406,7 +542,7 @@ function handlePointerUp(e) {
     if (!isDragging && 
         clickDuration < INTERACTION_CONFIG.CLICK_THRESHOLD_MS && 
         currentState !== 'CLICK') {
-        // 触发点击动画
+        // 触发点击动画/触发器
         console.log('触发点击动画');
         playAnimation('CLICK');
     }
@@ -414,6 +550,8 @@ function handlePointerUp(e) {
     // 重置拖拽状态
     isDragging = false;
     dragStartTime = 0;
+    if (rafMoveId) { cancelAnimationFrame(rafMoveId); rafMoveId = 0; }
+    pendingScreenTarget = null;
 }
 
 /**
@@ -426,7 +564,7 @@ function handlePointerLeave(e) {
     if (!isDragging) {
         sleepGraceTimer = setTimeout(() => {
             if (!isPointerInside && currentState !== 'SLEEP') {
-                console.log('触发 Sleep 动画');
+                console.log('触发 Sleep 动作');
                 playAnimation('SLEEP');
             }
         }, INTERACTION_CONFIG.SLEEP_GRACE_MS);

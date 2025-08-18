@@ -3,13 +3,28 @@
 <head>
 	<meta charset="UTF-8" />
 	<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+	<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; connect-src 'self' https://ai.comfly.chat; media-src 'none'; frame-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'; child-src 'self'; worker-src 'self';" />
 	<title>Desktop Pet</title>
 	<link rel="stylesheet" href="./styles.css" />
 	<script src="../node_modules/@rive-app/canvas/rive.js"></script>
 	<script defer src="./index.js"></script>
 </head>
-<body>
-	<div id="root"><canvas id="pet"></canvas></div>
+<body style="background: transparent;">
+	<div id="app">
+		<canvas id="rive-canvas"></canvas>
+		<div id="loading-overlay" class="loading-overlay">
+			<div class="loading-spinner"></div>
+			<p>正在加载...</p>
+		</div>
+		<div id="error-overlay" class="error-overlay hidden">
+			<div class="error-message">
+				<h3>加载失败</h3>
+				<p id="error-text">发生未知错误</p>
+				<button id="retry-btn" class="retry-button">重试</button>
+			</div>
+		</div>
+		<button id="chat-fab" aria-label="Chat">💬</button>
+	</div>
 </body>
 </html>
 

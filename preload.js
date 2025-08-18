@@ -13,6 +13,16 @@ const SECURITY_CONFIG = {
   ].filter(Boolean)
 };
 
+function resolveInputPath(filePath) {
+  if (!filePath) return '';
+  try {
+    if (path.isAbsolute(filePath)) return path.normalize(filePath);
+    return path.resolve(__dirname, filePath);
+  } catch (_) {
+    return '';
+  }
+}
+
 /**
  * 路径安全检查
  * @param {string} filePath - 要检查的文件路径
@@ -20,8 +30,8 @@ const SECURITY_CONFIG = {
  */
 function isPathSafe(filePath) {
   try {
-    // 标准化路径
-    const resolvedPath = path.resolve(filePath);
+    // 标准化路径（相对 preload 所在目录）
+    const resolvedPath = resolveInputPath(filePath);
     
     // 检查文件扩展名
     const ext = path.extname(resolvedPath).toLowerCase();
@@ -69,7 +79,7 @@ async function readFileBuffer(filePath) {
         return;
       }
       
-      const resolvedPath = path.resolve(filePath);
+      const resolvedPath = resolveInputPath(filePath);
       
       // 读取文件
       fs.readFile(resolvedPath, (err, data) => {
@@ -79,13 +89,21 @@ async function readFileBuffer(filePath) {
           return;
         }
         
-        // 转换为 ArrayBuffer
-        const arrayBuffer = data.buffer.slice(
-          data.byteOffset,
-          data.byteOffset + data.byteLength
-        );
-        
-        resolve(arrayBuffer);
+        // 转换为 Uint8Array（避免某些环境下 ArrayBuffer 结构化克隆为空的问题）
+        try {
+          const bytes = new Uint8Array(data);
+          resolve(bytes);
+        } catch (e) {
+          try {
+            const arrayBuffer = data.buffer.slice(
+              data.byteOffset,
+              data.byteOffset + data.byteLength
+            );
+            resolve(new Uint8Array(arrayBuffer));
+          } catch (e2) {
+            reject(new Error('无法转换文件为二进制数组'));
+          }
+        }
       });
     } catch (error) {
       console.error(`readFileBuffer 错误: ${error.message}`);
@@ -117,6 +135,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
   
   // 窗口移动 API
   moveWindow,
+  moveTo: (screenX, screenY) => ipcRenderer.send('win:moveTo', { screenX, screenY }),
+  getBounds: () => ipcRenderer.invoke('win:getBounds'),
   
   // 获取环境变量（只暴露需要的）
   getEnvVar: (key) => {
@@ -129,4 +149,25 @@ contextBridge.exposeInMainWorld('electronAPI', {
   
   // 获取应用路径
   getAppPath: () => __dirname
+});
+
+// Chat safe bridge
+contextBridge.exposeInMainWorld('chatAPI', {
+  openPopover: () => ipcRenderer.invoke('chat:openPopover'),
+  send: (text) => ipcRenderer.invoke('chat:send', text),
+  getGreeting: () => ipcRenderer.invoke('chat:getGreeting'),
+  onDelta: (handler) => {
+    const listener = (_, payload) => handler(payload);
+    ipcRenderer.on('chat:delta', listener);
+    return () => ipcRenderer.removeListener('chat:delta', listener);
+  },
+});
+
+// Pet actions from main
+contextBridge.exposeInMainWorld('petAPI', {
+  onActions: (handler) => {
+    const listener = (_, payload) => handler(payload);
+    ipcRenderer.on('pet:actions', listener);
+    return () => ipcRenderer.removeListener('pet:actions', listener);
+  }
 });
