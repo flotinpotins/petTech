@@ -1,50 +1,45 @@
 const { contextBridge, ipcRenderer } = require('electron');
-const fs = require('fs');
-const path = require('path');
 
 // 安全配置
 const SECURITY_CONFIG = {
   // 允许的文件扩展名
   ALLOWED_EXTENSIONS: ['.riv'],
-  // 允许的根目录（从环境变量或默认路径获取）
-  ALLOWED_ROOTS: [
-    path.resolve(__dirname, 'assets'),
-    process.env.PET_RIV_PATH ? path.dirname(path.resolve(process.env.PET_RIV_PATH)) : null
-  ].filter(Boolean)
+  // 允许的根目录名称（用于基本检查）
+  ALLOWED_DIRS: ['assets']
 };
 
 /**
- * 路径安全检查
+ * 基本路径安全检查
  * @param {string} filePath - 要检查的文件路径
  * @returns {boolean} - 路径是否安全
  */
 function isPathSafe(filePath) {
   try {
-    // 标准化路径
-    const resolvedPath = path.resolve(filePath);
+    // 基本安全检查
+    if (!filePath || typeof filePath !== 'string') {
+      return false;
+    }
+    
+    // 检查是否包含危险字符
+    if (filePath.includes('..') || filePath.includes('~')) {
+      console.warn(`路径包含危险字符: ${filePath}`);
+      return false;
+    }
     
     // 检查文件扩展名
-    const ext = path.extname(resolvedPath).toLowerCase();
-    if (!SECURITY_CONFIG.ALLOWED_EXTENSIONS.includes(ext)) {
-      console.warn(`不允许的文件扩展名: ${ext}`);
+    const ext = filePath.toLowerCase().split('.').pop();
+    if (!SECURITY_CONFIG.ALLOWED_EXTENSIONS.includes('.' + ext)) {
+      console.warn(`不允许的文件扩展名: .${ext}`);
       return false;
     }
     
-    // 检查是否在允许的根目录内
-    const isInAllowedRoot = SECURITY_CONFIG.ALLOWED_ROOTS.some(root => {
-      const relativePath = path.relative(root, resolvedPath);
-      return !relativePath.startsWith('..') && !path.isAbsolute(relativePath);
-    });
+    // 检查是否在允许的目录内
+    const hasAllowedDir = SECURITY_CONFIG.ALLOWED_DIRS.some(dir => 
+      filePath.includes(dir)
+    );
     
-    if (!isInAllowedRoot) {
-      console.warn(`文件不在允许的目录内: ${resolvedPath}`);
-      return false;
-    }
-    
-    // 检查文件是否存在且不是软链接
-    const stats = fs.lstatSync(resolvedPath);
-    if (stats.isSymbolicLink()) {
-      console.warn(`拒绝软链接文件: ${resolvedPath}`);
+    if (!hasAllowedDir) {
+      console.warn(`文件不在允许的目录内: ${filePath}`);
       return false;
     }
     
@@ -58,40 +53,31 @@ function isPathSafe(filePath) {
 /**
  * 安全的文件读取函数
  * @param {string} filePath - 文件路径
- * @returns {Promise<ArrayBuffer>} - 文件内容的 ArrayBuffer
+ * @returns {Promise<ArrayBuffer|null>} - 文件内容的 ArrayBuffer 或 null
  */
 async function readFileBuffer(filePath) {
-  return new Promise((resolve, reject) => {
-    try {
-      // 安全检查
-      if (!isPathSafe(filePath)) {
-        reject(new Error('文件路径不安全或不被允许'));
-        return;
-      }
-      
-      const resolvedPath = path.resolve(filePath);
-      
-      // 读取文件
-      fs.readFile(resolvedPath, (err, data) => {
-        if (err) {
-          console.error(`文件读取失败: ${err.message}`);
-          reject(new Error(`文件读取失败: ${err.message}`));
-          return;
-        }
-        
-        // 转换为 ArrayBuffer
-        const arrayBuffer = data.buffer.slice(
-          data.byteOffset,
-          data.byteOffset + data.byteLength
-        );
-        
-        resolve(arrayBuffer);
-      });
-    } catch (error) {
-      console.error(`readFileBuffer 错误: ${error.message}`);
-      reject(error);
+  try {
+    // 路径安全检查
+    if (!isPathSafe(filePath)) {
+      throw new Error('文件路径不安全或不被允许');
     }
-  });
+    
+    console.log(`尝试读取文件: ${filePath}`);
+    
+    // 通过IPC请求主进程读取文件
+    const result = await ipcRenderer.invoke('file:readBuffer', filePath);
+    
+    if (result.success && result.buffer) {
+      console.log(`文件读取成功: ${filePath}, 大小: ${result.buffer.byteLength} 字节`);
+      return result.buffer;
+    } else {
+      throw new Error(result.error || '文件读取失败');
+    }
+    
+  } catch (error) {
+    console.error(`文件读取失败: ${filePath}`, error);
+    return null;
+  }
 }
 
 /**

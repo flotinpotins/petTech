@@ -94,5 +94,40 @@ ipcMain.handle('win:setIgnoreMouseEvents', async (event, ignore, options = {}) =
   }
 });
 
+// 安全文件读取
+ipcMain.handle('file:readBuffer', async (event, filePath) => {
+  try {
+    const fs = require('fs');
+    const path = require('path');
+    
+    // 安全检查：只允许读取assets目录下的.riv文件
+    const resolvedPath = path.resolve(filePath);
+    const assetsPath = path.resolve(__dirname, 'assets');
+    
+    if (!resolvedPath.startsWith(assetsPath) || !resolvedPath.endsWith('.riv')) {
+      throw new Error('不允许访问此文件');
+    }
+    
+    // 检查文件是否存在
+    if (!fs.existsSync(resolvedPath)) {
+      throw new Error('文件不存在');
+    }
+    
+    // 读取文件
+    const buffer = fs.readFileSync(resolvedPath);
+    
+    // 转换为ArrayBuffer
+    const arrayBuffer = buffer.buffer.slice(
+      buffer.byteOffset,
+      buffer.byteOffset + buffer.byteLength
+    );
+    
+    return { success: true, buffer: arrayBuffer };
+  } catch (error) {
+    console.error('文件读取失败:', error);
+    return { success: false, error: error.message };
+  }
+});
+
 // 在此文件中，你可以包含应用程序剩余的所有主进程代码。
 // 也可以拆分成几个文件，然后用 require 导入。
