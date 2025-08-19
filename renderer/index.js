@@ -12,7 +12,8 @@ const INTERACTION_CONFIG = {
     CLICK_THRESHOLD_PX: 5,   // 点击判定位移阈值
     SLEEP_GRACE_MS: 200,     // Sleep 触发宽限时间
     CANVAS_SIZE: 360,
-    DPI_SCALE: window.devicePixelRatio || 1
+    DPI_SCALE: window.devicePixelRatio || 1,
+    ALPHA_THRESHOLD: 10      // 透明度阈值，低于此值认为是透明区域
 };
 
 // 全局变量
@@ -28,29 +29,21 @@ let currentState = 'IDLE';
 let availableAnimations = {};
 let clickFallbackTimer = null;
 
-// State Machine 模式
-let useStateMachine = false;
-const STATE_MACHINE_NAME = 'State Machine 1';
-let smInputs = { click: null, awake: null, sleep: null };
-
 // 交互状态
 let isDragging = false;
 let dragStartTime = 0;
 let dragStartPos = { x: 0, y: 0 };
-let rafMoveId = 0;
-let pendingScreenTarget = null;
-let windowLeftTopAtDown = { x: 0, y: 0 };
-let pointerOffsetAtDown = { x: 0, y: 0 };
 let lastMoveTime = 0;
 let sleepGraceTimer = null;
 let isPointerInside = true;
+let isMouseEventsIgnored = false;
+let lastMouseCheckPos = { x: -1, y: -1 };
 
 // DOM 元素
 let loadingOverlay = null;
 let errorOverlay = null;
 let errorText = null;
 let retryBtn = null;
-let chatFab = null;
 
 /**
  * 等待 Rive 库加载
@@ -58,11 +51,6 @@ let chatFab = null;
 function waitForRive() {
     return new Promise((resolve, reject) => {
         if (typeof rive !== 'undefined') {
-            try {
-                if (rive.RuntimeLoader && typeof rive.RuntimeLoader.setWasmUrl === 'function') {
-                    rive.RuntimeLoader.setWasmUrl('../node_modules/@rive-app/canvas/rive.wasm');
-                }
-            } catch (e) {}
             resolve();
             return;
         }
@@ -73,11 +61,6 @@ function waitForRive() {
         const checkRive = () => {
             attempts++;
             if (typeof rive !== 'undefined') {
-                try {
-                    if (rive.RuntimeLoader && typeof rive.RuntimeLoader.setWasmUrl === 'function') {
-                        rive.RuntimeLoader.setWasmUrl('../node_modules/@rive-app/canvas/rive.wasm');
-                    }
-                } catch (e) {}
                 resolve();
             } else if (attempts >= maxAttempts) {
                 reject(new Error('Rive 库加载超时'));
@@ -104,7 +87,6 @@ async function init() {
         errorOverlay = document.getElementById('error-overlay');
         errorText = document.getElementById('error-text');
         retryBtn = document.getElementById('retry-btn');
-        chatFab = document.getElementById('chat-fab');
         
         if (!canvas) {
             throw new Error('找不到画布元素');
@@ -157,58 +139,33 @@ async function loadRiveAnimation() {
     try {
         showLoading(true);
         
-        let usedBufferMode = false;
-        let rivSrc = '../assets/pet.riv';
-
-        if (window.electronAPI) {
-            try {
-                const envPath = window.electronAPI.getEnvVar('PET_RIV_PATH');
-                const rivPath = envPath || './assets/pet.riv';
-                console.log('加载动画文件(IPC):', rivPath);
-                const fileBuffer = await window.electronAPI.readFileBuffer(rivPath);
-                if (!fileBuffer || typeof fileBuffer.byteLength === 'undefined' || fileBuffer.byteLength === 0) {
-                    throw new Error('读取到的文件为空');
-                }
-                usedBufferMode = true;
-                riveInstance = new rive.Rive({
-                    buffer: fileBuffer,
-                    canvas: canvas,
-                    autoplay: true,
-                    stateMachines: STATE_MACHINE_NAME,
-                    onLoad: () => {
-                        console.log('Rive 动画加载成功');
-                        onRiveLoaded();
-                    },
-                    onLoadError: (error) => {
-                        console.error('Rive 加载错误:', error);
-                        showError('动画加载失败', `无法加载动画文件: ${error}`);
-                    }
-                });
-            } catch (e) {
-                console.warn('通过 electronAPI 加载失败，回退到相对路径:', e);
+        // 确保 electronAPI 可用
+        if (!window.electronAPI) {
+            throw new Error('electronAPI 未就绪');
+        }
+        
+        // 获取动画文件路径
+        const rivPath = window.electronAPI.getEnvVar('PET_RIV_PATH') || './assets/pet.riv';
+        
+        console.log('加载动画文件:', rivPath);
+        
+        // 读取动画文件
+        const fileBuffer = await window.electronAPI.readFileBuffer(rivPath);
+        
+        // 创建 Rive 实例
+        riveInstance = new rive.Rive({
+            buffer: fileBuffer,
+            canvas: canvas,
+            autoplay: false,
+            onLoad: () => {
+                console.log('Rive 动画加载成功');
+                onRiveLoaded();
+            },
+            onLoadError: (error) => {
+                console.error('Rive 加载错误:', error);
+                showError('动画加载失败', `无法加载动画文件: ${error}`);
             }
-        } else {
-            console.warn('electronAPI 不可用，使用相对路径加载 .riv');
-        }
-
-        if (!usedBufferMode) {
-            // 从相对路径回退加载（从 renderer/ 到 ../assets/）
-            console.log('加载动画文件(src):', rivSrc);
-            riveInstance = new rive.Rive({
-                src: rivSrc,
-                canvas: canvas,
-                autoplay: true,
-                stateMachines: STATE_MACHINE_NAME,
-                onLoad: () => {
-                    console.log('Rive 动画加载成功(src)');
-                    onRiveLoaded();
-                },
-                onLoadError: (error) => {
-                    console.error('Rive 加载错误(src):', error);
-                    showError('动画加载失败', `无法加载动画文件: ${error}`);
-                }
-            });
-        }
+        });
         
     } catch (error) {
         console.error('加载动画文件失败:', error);
@@ -227,20 +184,11 @@ function onRiveLoaded() {
             throw new Error('无法获取 artboard');
         }
         
-        // 优先尝试 State Machine 输入
-        setupStateMachineInputs();
-
-        // 如果没有 State Machine 输入则回退到动画扫描
-        if (!useStateMachine) {
-            scanAvailableAnimations();
-        }
+        // 扫描可用动画
+        scanAvailableAnimations();
         
-        // 开始播放默认动画/触发唤醒
-        if (useStateMachine) {
-            triggerStateAction('IDLE');
-        } else {
-            playAnimation('IDLE');
-        }
+        // 开始播放默认动画
+        playAnimation('IDLE');
         
         // 隐藏加载界面
         showLoading(false);
@@ -252,25 +200,6 @@ function onRiveLoaded() {
     } catch (error) {
         console.error('Rive 初始化失败:', error);
         showError('动画初始化失败', error.message);
-    }
-}
-
-function setupStateMachineInputs() {
-    try {
-        const inputs = riveInstance.stateMachineInputs(STATE_MACHINE_NAME) || [];
-        const byName = {};
-        for (const input of inputs) {
-            byName[input.name] = input;
-        }
-        smInputs.click = byName['clik'] || byName['click'] || null;
-        smInputs.awake = byName['chick-awake'] || byName['awake'] || null;
-        smInputs.sleep = byName['chick-sleep'] || byName['sleep'] || null;
-        useStateMachine = Boolean(smInputs.click || smInputs.awake || smInputs.sleep);
-        if (useStateMachine) {
-            console.log('使用 State Machine 模式');
-        }
-    } catch (e) {
-        useStateMachine = false;
     }
 }
 
@@ -317,10 +246,6 @@ function scanAvailableAnimations() {
  */
 function playAnimation(stateKey) {
     try {
-        if (useStateMachine) {
-            triggerStateAction(stateKey);
-            return;
-        }
         const animData = availableAnimations[stateKey];
         
         if (!animData) {
@@ -331,10 +256,10 @@ function playAnimation(stateKey) {
             return;
         }
         
-        // 播放新动画（清理已有动画实例后播放）
-        try {
-            artboard.animationByIndex(0)?.delete();
-        } catch (e) {}
+        // 清除之前的动画
+        artboard.animationByIndex(0)?.delete();
+        
+        // 播放新动画
         const animationInstance = new rive.LinearAnimationInstance(animData.animation);
         artboard.addAnimationInstance(animationInstance);
         
@@ -351,17 +276,6 @@ function playAnimation(stateKey) {
         if (stateKey !== 'IDLE') {
             playAnimation('IDLE');
         }
-    }
-}
-
-function triggerStateAction(stateKey) {
-    if (!useStateMachine) return;
-    if (stateKey === 'CLICK' && smInputs.click) {
-        smInputs.click.fire();
-    } else if (stateKey === 'SLEEP' && smInputs.sleep) {
-        smInputs.sleep.fire();
-    } else if (stateKey === 'IDLE' && smInputs.awake) {
-        smInputs.awake.fire();
     }
 }
 
@@ -401,40 +315,21 @@ function bindEvents() {
     // 防止右键菜单
     canvas.addEventListener('contextmenu', (e) => e.preventDefault());
     
+    // 添加全局鼠标移动监听器，用于实时检测透明度
+    document.addEventListener('mousemove', (e) => {
+        // 只在鼠标不在拖拽状态时检测透明度
+        if (!isDragging) {
+            updateMouseEventsIgnore(e.clientX, e.clientY);
+        }
+    });
+    
     // 重试按钮
     if (retryBtn) {
         retryBtn.addEventListener('click', handleRetry);
     }
-
-    if (chatFab) {
-        chatFab.addEventListener('click', async () => {
-            try {
-                await window.chatAPI.openPopover();
-            } catch (e) {}
-        });
-    }
     
     // DPI 变化监听
     setupDPIListener();
-
-    // Listen optional pet actions from chat
-    if (window.petAPI && typeof window.petAPI.onActions === 'function') {
-        window.petAPI.onActions((payload) => {
-            try {
-                const actions = (payload && payload.actions) || [];
-                for (const action of actions) {
-                    if (!action || !action.name) continue;
-                    if (action.name === 'click') {
-                        playAnimation('CLICK');
-                    } else if (action.name === 'awake') {
-                        playAnimation('IDLE');
-                    } else if (action.name === 'sleep') {
-                        playAnimation('SLEEP');
-                    }
-                }
-            } catch (e) {}
-        });
-    }
     
     console.log('事件监听器绑定完成');
 }
@@ -469,6 +364,11 @@ function setupDPIListener() {
 function handlePointerDown(e) {
     e.preventDefault();
     
+    // 检查当前位置是否透明，如果是透明区域则不处理事件
+    if (isPixelTransparent(e.clientX, e.clientY)) {
+        return;
+    }
+    
     // 设置指针捕获
     canvas.setPointerCapture(e.pointerId);
     
@@ -481,16 +381,64 @@ function handlePointerDown(e) {
         clearTimeout(sleepGraceTimer);
         sleepGraceTimer = null;
     }
-    // 记录窗口左上角的屏幕坐标与指针偏移
-    if (window.electronAPI && typeof window.electronAPI.getBounds === 'function') {
-        window.electronAPI.getBounds().then(({ bounds, scaleFactor }) => {
-            if (!bounds) return;
-            const s = scaleFactor || (window.devicePixelRatio || 1);
-            const dipLeftTop = { x: bounds.x, y: bounds.y };
-            windowLeftTopAtDown = { x: dipLeftTop.x * s, y: dipLeftTop.y * s };
-            const pointerScreen = { x: e.screenX, y: e.screenY };
-            pointerOffsetAtDown = { x: pointerScreen.x - windowLeftTopAtDown.x, y: pointerScreen.y - windowLeftTopAtDown.y };
-        }).catch(() => {});
+}
+
+/**
+ * 检测指定位置的像素是否透明
+ * @param {number} x - X坐标
+ * @param {number} y - Y坐标
+ * @returns {boolean} - 是否为透明区域
+ */
+function isPixelTransparent(x, y) {
+    if (!ctx || !canvas) return true;
+    
+    try {
+        // 获取设备像素比
+        const dpr = window.devicePixelRatio || 1;
+        const canvasX = Math.floor(x * dpr);
+        const canvasY = Math.floor(y * dpr);
+        
+        // 检查坐标是否在canvas范围内
+        if (canvasX < 0 || canvasY < 0 || canvasX >= canvas.width || canvasY >= canvas.height) {
+            return true;
+        }
+        
+        // 获取像素数据
+        const imageData = ctx.getImageData(canvasX, canvasY, 1, 1);
+        const alpha = imageData.data[3]; // Alpha通道
+        
+        return alpha < INTERACTION_CONFIG.ALPHA_THRESHOLD;
+    } catch (error) {
+        console.warn('检测像素透明度失败:', error);
+        return false; // 出错时默认不透明，保持交互功能
+    }
+}
+
+/**
+ * 更新鼠标事件穿透状态
+ * @param {number} x - 鼠标X坐标
+ * @param {number} y - 鼠标Y坐标
+ */
+async function updateMouseEventsIgnore(x, y) {
+    // 避免频繁检测相同位置
+    if (x === lastMouseCheckPos.x && y === lastMouseCheckPos.y) {
+        return;
+    }
+    
+    lastMouseCheckPos = { x, y };
+    
+    const shouldIgnore = isPixelTransparent(x, y);
+    
+    if (shouldIgnore !== isMouseEventsIgnored) {
+        isMouseEventsIgnored = shouldIgnore;
+        
+        if (shouldIgnore) {
+            // 在透明区域，启用穿透
+            await window.electronAPI.setIgnoreMouseEvents(true, { forward: true });
+        } else {
+            // 在非透明区域，禁用穿透以保持交互功能
+            await window.electronAPI.setIgnoreMouseEvents(false);
+        }
     }
 }
 
@@ -498,6 +446,9 @@ function handlePointerDown(e) {
  * 处理指针移动事件
  */
 function handlePointerMove(e) {
+    // 更新鼠标事件穿透状态
+    updateMouseEventsIgnore(e.clientX, e.clientY);
+    
     if (dragStartTime === 0) return;
     
     const currentTime = Date.now();
@@ -511,20 +462,11 @@ function handlePointerMove(e) {
         console.log('开始拖拽');
     }
     
-    // rAF 合并：计算目标屏幕左上角
-    if (isDragging && window.electronAPI && typeof window.electronAPI.moveTo === 'function') {
-        const targetScreenX = e.screenX - pointerOffsetAtDown.x;
-        const targetScreenY = e.screenY - pointerOffsetAtDown.y;
-        pendingScreenTarget = { x: targetScreenX, y: targetScreenY };
-        if (!rafMoveId) {
-            rafMoveId = requestAnimationFrame(() => {
-                rafMoveId = 0;
-                if (pendingScreenTarget) {
-                    window.electronAPI.moveTo(pendingScreenTarget.x, pendingScreenTarget.y);
-                    pendingScreenTarget = null;
-                }
-            });
-        }
+    // 如果正在拖拽，移动窗口（节流处理）
+    if (isDragging && currentTime - lastMoveTime > 8) { // ~120Hz
+        window.electronAPI.moveWindow(deltaX, deltaY);
+        dragStartPos = { x: e.clientX, y: e.clientY };
+        lastMoveTime = currentTime;
     }
 }
 
@@ -541,8 +483,9 @@ function handlePointerUp(e) {
     
     if (!isDragging && 
         clickDuration < INTERACTION_CONFIG.CLICK_THRESHOLD_MS && 
-        currentState !== 'CLICK') {
-        // 触发点击动画/触发器
+        currentState !== 'CLICK' &&
+        !isPixelTransparent(e.clientX, e.clientY)) {
+        // 触发点击动画（确保点击位置不是透明区域）
         console.log('触发点击动画');
         playAnimation('CLICK');
     }
@@ -550,8 +493,6 @@ function handlePointerUp(e) {
     // 重置拖拽状态
     isDragging = false;
     dragStartTime = 0;
-    if (rafMoveId) { cancelAnimationFrame(rafMoveId); rafMoveId = 0; }
-    pendingScreenTarget = null;
 }
 
 /**
@@ -564,10 +505,16 @@ function handlePointerLeave(e) {
     if (!isDragging) {
         sleepGraceTimer = setTimeout(() => {
             if (!isPointerInside && currentState !== 'SLEEP') {
-                console.log('触发 Sleep 动作');
+                console.log('触发 Sleep 动画');
                 playAnimation('SLEEP');
             }
         }, INTERACTION_CONFIG.SLEEP_GRACE_MS);
+    }
+    
+    // 离开画布时重置穿透状态
+    if (isMouseEventsIgnored) {
+        isMouseEventsIgnored = false;
+        window.electronAPI.setIgnoreMouseEvents(false);
     }
 }
 
@@ -588,6 +535,9 @@ function handlePointerEnter(e) {
         console.log('从 Sleep 恢复到 Idle');
         playAnimation('IDLE');
     }
+    
+    // 进入画布时检测透明度
+    updateMouseEventsIgnore(e.clientX, e.clientY);
 }
 
 /**
